@@ -8,6 +8,23 @@ config DEFCONFIG_LIST
 	default ARCH_DEFCONFIG
 	default "arch/$(ARCH)/defconfig"
 
+config CC_VERSION_TEXT
+	string
+	default "$(CC_VERSION_TEXT)"
+	help
+	  This is used in unclear ways:
+
+	  - Re-run Kconfig when the compiler is updated
+	    The 'default' property references the environment variable,
+	    CC_VERSION_TEXT so it is recorded in include/config/auto.conf.cmd.
+	    When the compiler is updated, Kconfig will be invoked.
+
+	  - Ensure full rebuild when the compier is updated
+	    include/linux/kconfig.h contains this option in the comment line so
+	    fixdep adds include/config/cc/version/text.h into the auto-generated
+	    dependency. When the compiler is updated, syncconfig will touch it
+	    and then every file will be rebuilt.
+
 config CC_IS_GCC
 	def_bool $(success,$(CC) --version | head -n 1 | grep -q gcc)
 
@@ -1304,6 +1321,22 @@ config STUNE_ASSIST
 	  This option enables in-kernel overrides for SchedTune values.
           If unsure, say N.
 
+config UCLAMP_ASSIST
+	bool "UClamp configuration helper"
+	depends on ANDROID && UCLAMP_TASK && UCLAMP_TASK_GROUP
+	help
+	  This option enabled in-kernel uclamp setting overrides
+
+config RT_SOFTIRQ_AWARE_SCHED
+	bool "Improve RT scheduling during long softirq execution"
+	depends on SMP && !PREEMPT_RT
+	default n
+	help
+	  Enable an optimization which tries to avoid placing RT tasks on CPUs
+	  occupied by nonpreemptible tasks, such as a long softirq or CPUs
+	  which may soon block preemptions, such as a CPU running a ksoftirq
+	  thread which handles slow softirqs.
+
 config CPUSET_ASSIST
 	bool "Cpuset configuration helper"
 	depends on CPUSETS
@@ -1562,7 +1595,7 @@ config SGETMASK_SYSCALL
 
 config SYSFS_SYSCALL
 	bool "Sysfs syscall support" if EXPERT
-	default y
+	default n
 	---help---
 	  sys_sysfs is an obsolete system call no longer supported in libc.
 	  Note that disabling this option is more secure but might break

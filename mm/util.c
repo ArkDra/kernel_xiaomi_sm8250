@@ -4,6 +4,7 @@
 #include <linux/compiler.h>
 #include <linux/export.h>
 #include <linux/err.h>
+#include <linux/file.h>
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/task_stack.h>
@@ -43,6 +44,8 @@ EXPORT_SYMBOL(kfree_const);
  * kstrdup - allocate space for and copy an existing string
  * @s: the string to duplicate
  * @gfp: the GFP mask used in the kmalloc() call when allocating memory
+ *
+ * Return: newly allocated copy of @s or %NULL in case of error
  */
 char *kstrdup(const char *s, gfp_t gfp)
 {
@@ -65,9 +68,10 @@ EXPORT_SYMBOL(kstrdup);
  * @s: the string to duplicate
  * @gfp: the GFP mask used in the kmalloc() call when allocating memory
  *
- * Function returns source string if it is in .rodata section otherwise it
- * fallbacks to kstrdup.
- * Strings allocated by kstrdup_const should be freed by kfree_const.
+ * Note: Strings allocated by kstrdup_const should be freed by kfree_const.
+ *
+ * Return: source string if it is in .rodata section otherwise
+ * fallback to kstrdup.
  */
 const char *kstrdup_const(const char *s, gfp_t gfp)
 {
@@ -85,6 +89,8 @@ EXPORT_SYMBOL(kstrdup_const);
  * @gfp: the GFP mask used in the kmalloc() call when allocating memory
  *
  * Note: Use kmemdup_nul() instead if the size is known exactly.
+ *
+ * Return: newly allocated copy of @s or %NULL in case of error
  */
 char *kstrndup(const char *s, size_t max, gfp_t gfp)
 {
@@ -110,6 +116,8 @@ EXPORT_SYMBOL(kstrndup);
  * @src: memory region to duplicate
  * @len: memory region length
  * @gfp: GFP mask to use
+ *
+ * Return: newly allocated copy of @src or %NULL in case of error
  */
 void *kmemdup(const void *src, size_t len, gfp_t gfp)
 {
@@ -127,6 +135,9 @@ EXPORT_SYMBOL(kmemdup);
  * @s: The data to stringify
  * @len: The size of the data
  * @gfp: the GFP mask used in the kmalloc() call when allocating memory
+ *
+ * Return: newly allocated copy of @s with NUL-termination or %NULL in
+ * case of error
  */
 char *kmemdup_nul(const char *s, size_t len, gfp_t gfp)
 {
@@ -150,7 +161,7 @@ EXPORT_SYMBOL(kmemdup_nul);
  * @src: source address in user space
  * @len: number of bytes to copy
  *
- * Returns an ERR_PTR() on failure.  Result is physically
+ * Return: an ERR_PTR() on failure.  Result is physically
  * contiguous, to be freed by kfree().
  */
 void *memdup_user(const void __user *src, size_t len)
@@ -176,7 +187,7 @@ EXPORT_SYMBOL(memdup_user);
  * @src: source address in user space
  * @len: number of bytes to copy
  *
- * Returns an ERR_PTR() on failure.  Result may be not
+ * Return: an ERR_PTR() on failure.  Result may be not
  * physically contiguous.  Use kvfree() to free.
  */
 void *vmemdup_user(const void __user *src, size_t len)
@@ -200,6 +211,8 @@ EXPORT_SYMBOL(vmemdup_user);
  * strndup_user - duplicate an existing string from user space
  * @s: The string to duplicate
  * @n: Maximum number of bytes to copy, including the trailing NUL.
+ *
+ * Return: newly allocated copy of @s or %NULL in case of error
  */
 char *strndup_user(const char __user *s, long n)
 {
@@ -231,7 +244,7 @@ EXPORT_SYMBOL(strndup_user);
  * @src: source address in user space
  * @len: number of bytes to copy
  *
- * Returns an ERR_PTR() on failure.
+ * Return: an ERR_PTR() on failure.
  */
 void *memdup_user_nul(const void __user *src, size_t len)
 {
@@ -257,7 +270,7 @@ void *memdup_user_nul(const void __user *src, size_t len)
 EXPORT_SYMBOL(memdup_user_nul);
 
 void __vma_link_list(struct mm_struct *mm, struct vm_area_struct *vma,
-		struct vm_area_struct *prev, struct rb_node *rb_parent)
+		struct vm_area_struct *prev)
 {
 	struct vm_area_struct *next;
 
@@ -266,16 +279,26 @@ void __vma_link_list(struct mm_struct *mm, struct vm_area_struct *vma,
 		next = prev->vm_next;
 		prev->vm_next = vma;
 	} else {
+		next = mm->mmap;
 		mm->mmap = vma;
-		if (rb_parent)
-			next = rb_entry(rb_parent,
-					struct vm_area_struct, vm_rb);
-		else
-			next = NULL;
 	}
 	vma->vm_next = next;
 	if (next)
 		next->vm_prev = vma;
+}
+
+void __vma_unlink_list(struct mm_struct *mm, struct vm_area_struct *vma)
+{
+	struct vm_area_struct *prev, *next;
+
+	next = vma->vm_next;
+	prev = vma->vm_prev;
+	if (prev)
+		prev->vm_next = next;
+	else
+		mm->mmap = next;
+	if (next)
+		next->vm_prev = prev;
 }
 
 /* Check if the vma is being used as a stack by this task */
@@ -285,6 +308,18 @@ int vma_is_stack_for_current(struct vm_area_struct *vma)
 
 	return (vma->vm_start <= KSTK_ESP(t) && vma->vm_end >= KSTK_ESP(t));
 }
+
+/*
+ * Change backing file, only valid to use during initial VMA setup.
+ */
+void vma_set_file(struct vm_area_struct *vma, struct file *file)
+{
+	/* Changing an anonymous vma with this is illegal */
+	get_file(file);
+	swap(vma->vm_file, file);
+	fput(file);
+}
+EXPORT_SYMBOL(vma_set_file);
 
 #if defined(CONFIG_MMU) && !defined(HAVE_ARCH_PICK_MMAP_LAYOUT)
 void arch_pick_mmap_layout(struct mm_struct *mm, struct rlimit *rlim_stack)
@@ -317,10 +352,6 @@ EXPORT_SYMBOL_GPL(__get_user_pages_fast);
  * @pages:	array that receives pointers to the pages pinned.
  *		Should be at least nr_pages long.
  *
- * Returns number of pages pinned. This may be fewer than the number
- * requested. If nr_pages is 0 or negative, returns 0. If no pages
- * were pinned, returns -errno.
- *
  * get_user_pages_fast provides equivalent functionality to get_user_pages,
  * operating on current and current->mm, with force=0 and vma=NULL. However
  * unlike get_user_pages, it must be called without mmap_sem held.
@@ -332,6 +363,10 @@ EXPORT_SYMBOL_GPL(__get_user_pages_fast);
  * pages have to be faulted in, it may turn out to be slightly slower so
  * callers need to carefully consider what to use. On many architectures,
  * get_user_pages_fast simply falls back to get_user_pages.
+ *
+ * Return: number of pages pinned. This may be fewer than the number
+ * requested. If nr_pages is 0 or negative, returns 0. If no pages
+ * were pinned, returns -errno.
  */
 int __weak get_user_pages_fast(unsigned long start,
 				int nr_pages, int write, struct page **pages)
@@ -354,8 +389,8 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 	if (!ret) {
 		if (down_write_killable(&mm->mmap_sem))
 			return -EINTR;
-		ret = do_mmap_pgoff(file, addr, len, prot, flag, pgoff,
-				    &populate, &uf);
+		ret = do_mmap(file, addr, len, prot, flag, pgoff, &populate,
+			      &uf);
 		up_write(&mm->mmap_sem);
 		userfaultfd_unmap_complete(mm, &uf);
 		if (populate)
@@ -393,6 +428,8 @@ EXPORT_SYMBOL(vm_mmap);
  *
  * Please note that any use of gfp flags outside of GFP_KERNEL is careful to not
  * fall back to vmalloc.
+ *
+ * Return: pointer to the allocated memory of %NULL in case of failure
  */
 void *kvmalloc_node(size_t size, gfp_t flags, int node)
 {
@@ -581,7 +618,7 @@ int sysctl_overcommit_memory __read_mostly = OVERCOMMIT_GUESS;
 int sysctl_overcommit_ratio __read_mostly = 50;
 unsigned long sysctl_overcommit_kbytes __read_mostly;
 int sysctl_max_map_count __read_mostly = DEFAULT_MAX_MAP_COUNT;
-unsigned long sysctl_user_reserve_kbytes __read_mostly = 1UL << 17; /* 128MB */
+unsigned long sysctl_user_reserve_kbytes __read_mostly; /* 0MB */
 unsigned long sysctl_admin_reserve_kbytes __read_mostly; /* 0MB */
 
 int overcommit_ratio_handler(struct ctl_table *table, int write,
@@ -618,7 +655,7 @@ unsigned long vm_commit_limit(void)
 	if (sysctl_overcommit_kbytes)
 		allowed = sysctl_overcommit_kbytes >> (PAGE_SHIFT - 10);
 	else
-		allowed = ((totalram_pages - hugetlb_total_pages())
+		allowed = ((totalram_pages() - hugetlb_total_pages())
 			   * sysctl_overcommit_ratio / 100);
 	allowed += total_swap_pages;
 
@@ -754,7 +791,8 @@ error:
  * @buffer:   the buffer to copy to.
  * @buflen:   the length of the buffer. Larger cmdline values are truncated
  *            to this length.
- * Returns the size of the cmdline field copied. Note that the copy does
+ *
+ * Return: the size of the cmdline field copied. Note that the copy does
  * not guarantee an ending NULL byte.
  */
 int get_cmdline(struct task_struct *task, char *buffer, int buflen)

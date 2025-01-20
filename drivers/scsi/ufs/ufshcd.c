@@ -219,7 +219,7 @@ static void ufshcd_update_uic_error_cnt(struct ufs_hba *hba, u32 reg, int type)
 				 UTP_TASK_REQ_COMPL |\
 				 UFSHCD_ERROR_MASK)
 /* UIC command timeout, unit: ms */
-#define UIC_CMD_TIMEOUT	500
+#define UIC_CMD_TIMEOUT	3000
 
 #define UIC_MI_CMD_TIMEOUT	3000
 /* NOP OUT retries waiting for NOP IN response */
@@ -467,10 +467,7 @@ static struct ufs_dev_fix ufs_fixups[] = {
 		UFS_DEVICE_QUIRK_HS_G1_TO_HS_G3_SWITCH),
 	UFS_FIX(UFS_VENDOR_SKHYNIX, "hC8HL1",
 		UFS_DEVICE_QUIRK_HS_G1_TO_HS_G3_SWITCH),
-	UFS_FIX(UFS_VENDOR_SAMSUNG, "KLUEG8UHDB-C2D1",
-		UFS_DEVICE_QUIRK_PA_HIBER8TIME),
-	UFS_FIX(UFS_VENDOR_SAMSUNG, "KLUDG4UHDB-B2D1",
-		UFS_DEVICE_QUIRK_PA_HIBER8TIME),
+
 	END_FIX
 };
 
@@ -1738,7 +1735,7 @@ out:
 
 static int ufshcd_clock_scaling_prepare(struct ufs_hba *hba)
 {
-	#define DOORBELL_CLR_TOUT_US		(1000 * 1000) /* 1 sec */
+	#define DOORBELL_CLR_TOUT_US		(40 * 1000 * 1000) /* 40 sec */
 	int ret = 0;
 	/*
 	 * make sure that there are no outstanding requests when
@@ -8827,13 +8824,6 @@ static int ufshcd_tune_pa_hibern8time(struct ufs_hba *hba)
 	int ret = 0;
 	u32 local_tx_hibern8_time_cap = 0, peer_rx_hibern8_time_cap = 0;
 	u32 max_hibern8_time, tuned_pa_hibern8time;
-	u32 pa_hibern8time_quirk_enabled = hba->dev_info.quirks &
-		UFS_DEVICE_QUIRK_PA_HIBER8TIME;
-
-	if (!ufshcd_is_unipro_pa_params_tuning_req(hba) &&
-	    !pa_hibern8time_quirk_enabled) {
-		return 0;
-	}
 
 	ret = ufshcd_dme_get(hba,
 			     UIC_ARG_MIB_SEL(TX_HIBERN8TIME_CAPABILITY,
@@ -8854,13 +8844,6 @@ static int ufshcd_tune_pa_hibern8time(struct ufs_hba *hba)
 	/* make sure proper unit conversion is applied */
 	tuned_pa_hibern8time = ((max_hibern8_time * HIBERN8TIME_UNIT_US)
 				/ PA_HIBERN8_TIME_UNIT_US);
-	/* PA_HIBERN8TIME is product of tuned_pa_hibern8time * granularity,
-	 * setting tuned_pa_hibern8time as 3 and since granularity is 100us
-	 * for both host and device side, 3 *100us = 300us is set as
-	 * PA_HIBERN8TIME if UFS_DEVICE_QUIRK_PA_HIBER8TIME quirk is enabled
-	 */
-	if (pa_hibern8time_quirk_enabled)
-		tuned_pa_hibern8time = 3; /* 3 *100us =300us */
 	ret = ufshcd_dme_set(hba, UIC_ARG_MIB(PA_HIBERN8TIME),
 			     tuned_pa_hibern8time);
 out:
@@ -8936,8 +8919,10 @@ static int ufshcd_quirk_tune_host_pa_tactivate(struct ufs_hba *hba)
 	}
 
 	if (pa_hibern8time_quirk_enabled) {
-		ret = ufshcd_dme_peer_set(hba, UIC_ARG_MIB(PA_TXHSG4SYNCLENGTH), 0x4F);
-		ret = ufshcd_dme_peer_set(hba, UIC_ARG_MIB(PA_TXHSG1SYNCLENGTH), 0x4F);
+		// Synclength G4 for SAMSUNG ufs
+		ret = ufshcd_dme_peer_set(hba, UIC_ARG_MIB(0x15D0), 0x4F);
+		// Synclength G1 for SANDISK ufs
+		ret = ufshcd_dme_peer_set(hba, UIC_ARG_MIB(0x1552), 0x4F);
 	}
 
 out:
@@ -9184,6 +9169,50 @@ static inline bool ufshcd_needs_reinit(struct ufs_hba *hba)
 	return reinit;
 }
 
+static char serial[QUERY_DESC_MAX_SIZE] = { 0 };
+
+char *ufs_get_serial(void)
+{
+	return serial;
+}
+
+static int ufs_init_serial(struct ufs_hba *hba)
+{
+	int err, i;
+	u8 model_index;
+	u8 str_desc_buf[QUERY_DESC_MAX_SIZE + 1];
+	u8 desc_buf[QUERY_DESC_DEVICE_DEF_SIZE];
+
+	err = ufshcd_read_device_desc(hba, desc_buf,
+				      QUERY_DESC_DEVICE_DEF_SIZE);
+	if (err) {
+		dev_err(hba->dev, "read device_desc failed\n");
+		goto out;
+	}
+
+	/*SerialNumber*/
+	model_index = desc_buf[DEVICE_DESC_PARAM_SN];
+	memset(str_desc_buf, 0, QUERY_DESC_MAX_SIZE);
+	err = ufshcd_read_string_desc(hba, model_index, str_desc_buf,
+				      QUERY_DESC_MAX_SIZE, FALSE);
+	if (err) {
+		dev_err(hba->dev, "read string descriptor failed\n");
+		goto out;
+	}
+
+	for (i = 2; ((i < str_desc_buf[QUERY_DESC_LENGTH_OFFSET]) &&
+		     (i < QUERY_DESC_MAX_SIZE / 2));
+	     i += 2) {
+		snprintf(serial + i * 2 - 4, 5, "%02x%02x", str_desc_buf[i],
+			 str_desc_buf[i + 1]);
+	}
+
+	dev_info(hba->dev, "SerialNumber: %s\n", serial);
+
+out:
+	return err;
+}
+
 /**
  * ufshcd_probe_hba - probe hba to detect device and initialize
  * @hba: per-adapter instance
@@ -9264,6 +9293,7 @@ reinit:
 
 	ufs_fixup_device_setup(hba, &card);
 	ufshcd_tune_unipro_params(hba);
+	ufs_init_serial(hba);
 
 	ufshcd_apply_pm_quirks(hba);
 	if (card.wspecversion < 0x300) {

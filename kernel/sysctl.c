@@ -131,6 +131,7 @@ static int __maybe_unused one = 1;
 static int __maybe_unused two = 2;
 static int __maybe_unused three = 3;
 static int __maybe_unused four = 4;
+static int int_max = INT_MAX;
 static unsigned long zero_ul;
 static unsigned long one_ul = 1;
 static unsigned long long_max = LONG_MAX;
@@ -231,6 +232,13 @@ enum sysctl_writes_mode {
 };
 
 static enum sysctl_writes_mode sysctl_writes_strict = SYSCTL_WRITES_STRICT;
+
+static int sysctl_sched_lib_name_handler(struct ctl_table *table, int write,
+                                         void __user *buffer, size_t *lenp,
+                                         loff_t *ppos)
+{
+    return 0;
+}
 
 static int proc_do_cad_pid(struct ctl_table *table, int write,
 		  void __user *buffer, size_t *lenp, loff_t *ppos);
@@ -652,15 +660,6 @@ static struct ctl_table kern_table[] = {
 		.proc_handler	= sched_updown_migrate_handler,
 	},
 	{
-		.procname	= "sched_prefer_spread",
-		.data		= &sysctl_sched_prefer_spread,
-		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
-		.proc_handler   = proc_dointvec_minmax,
-		.extra1		= &zero,
-		.extra2		= &four,
-	},
-	{
 		.procname	= "walt_rtg_cfs_boost_prio",
 		.data		= &sysctl_walt_rtg_cfs_boost_prio,
 		.maxlen		= sizeof(unsigned int),
@@ -795,6 +794,8 @@ static struct ctl_table kern_table[] = {
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
 		.proc_handler	= sched_rt_handler,
+		.extra1		= &one,
+		.extra2		= &int_max,
 	},
 	{
 		.procname	= "sched_rt_runtime_us",
@@ -802,6 +803,8 @@ static struct ctl_table kern_table[] = {
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= sched_rt_handler,
+		.extra1		= &neg_one,
+		.extra2		= &int_max,
 	},
 	{
 		.procname	= "sched_rr_timeslice_ms",
@@ -821,6 +824,13 @@ static struct ctl_table kern_table[] = {
 	{
 		.procname	= "sched_util_clamp_max",
 		.data		= &sysctl_sched_uclamp_util_max,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= sysctl_sched_uclamp_handler,
+	},
+	{
+		.procname	= "sched_util_clamp_min_rt_default",
+		.data		= &sysctl_sched_uclamp_util_min_rt_default,
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
 		.proc_handler	= sysctl_sched_uclamp_handler,
@@ -1738,7 +1748,7 @@ static struct ctl_table vm_table[] = {
 		.procname	= "dirty_background_bytes",
 		.data		= &dirty_background_bytes,
 		.maxlen		= sizeof(dirty_background_bytes),
-		.mode		= 0644,
+		.mode		= 0444,
 		.proc_handler	= dirty_background_bytes_handler,
 		.extra1		= &one_ul,
 	},
@@ -1746,7 +1756,7 @@ static struct ctl_table vm_table[] = {
 		.procname	= "dirty_ratio",
 		.data		= &vm_dirty_ratio,
 		.maxlen		= sizeof(vm_dirty_ratio),
-		.mode		= 0644,
+		.mode		= 0444,
 		.proc_handler	= dirty_ratio_handler,
 		.extra1		= &zero,
 		.extra2		= &one_hundred,
@@ -1755,7 +1765,7 @@ static struct ctl_table vm_table[] = {
 		.procname	= "dirty_bytes",
 		.data		= &vm_dirty_bytes,
 		.maxlen		= sizeof(vm_dirty_bytes),
-		.mode		= 0644,
+		.mode		= 0444,
 		.proc_handler	= dirty_bytes_handler,
 		.extra1		= &dirty_bytes_min,
 	},
@@ -1786,7 +1796,7 @@ static struct ctl_table vm_table[] = {
 		.procname	= "swappiness",
 		.data		= &vm_swappiness,
 		.maxlen		= sizeof(vm_swappiness),
-		.mode		= 0644,
+		.mode		= 0444,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= &zero,
 		.extra2		= &one_hundred,
@@ -1878,7 +1888,7 @@ static struct ctl_table vm_table[] = {
 		.procname	= "compact_unevictable_allowed",
 		.data		= &sysctl_compact_unevictable_allowed,
 		.maxlen		= sizeof(int),
-		.mode		= 0644,
+		.mode		= 0444,
 		.proc_handler	= proc_dointvec,
 		.extra1		= &zero,
 		.extra2		= &one,
@@ -3741,28 +3751,6 @@ int proc_douintvec_capacity(struct ctl_table *table, int write,
 				do_proc_douintvec_capacity_conv, NULL);
 }
 
-static int do_proc_douintvec_rwin(bool *negp, unsigned long *lvalp,
-				  int *valp, int write, void *data)
-{
-	if (write) {
-		if ((*lvalp >= 2 && *lvalp <= 5) || *lvalp == 8)
-			*valp = *lvalp;
-		else
-			return -EINVAL;
-	} else {
-		*negp = false;
-		*lvalp = *valp;
-	}
-
-	return 0;
-}
-
-int proc_douintvec_ravg_window(struct ctl_table *table, int write,
-			       void __user *buffer, size_t *lenp, loff_t *ppos)
-{
-	return do_proc_dointvec(table, write, buffer, lenp, ppos,
-				do_proc_douintvec_rwin, NULL);
-}
 
 #else /* CONFIG_PROC_SYSCTL */
 
@@ -3829,12 +3817,6 @@ int proc_doulongvec_ms_jiffies_minmax(struct ctl_table *table, int write,
 
 int proc_douintvec_capacity(struct ctl_table *table, int write,
 			    void __user *buffer, size_t *lenp, loff_t *ppos)
-{
-	return -ENOSYS;
-}
-
-int proc_douintvec_ravg_window(struct ctl_table *table, int write,
-			       void __user *buffer, size_t *lenp, loff_t *ppos)
 {
 	return -ENOSYS;
 }

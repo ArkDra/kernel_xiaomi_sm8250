@@ -59,13 +59,6 @@ enum migratetype {
 #endif
 	MIGRATE_PCPTYPES, /* the number of types on the pcp lists */
 	MIGRATE_HIGHATOMIC = MIGRATE_PCPTYPES,
-#ifdef CONFIG_EMERGENCY_MEMORY
-	/*
-	 * MIGRATE_EMERGENCY migration type is designed to save
-	 * non-costly non-NOWARN page allocation failure.
-	 */
-	MIGRATE_EMERGENCY,
-#endif
 #ifdef CONFIG_MEMORY_ISOLATION
 	MIGRATE_ISOLATE,	/* can't allocate from here */
 #endif
@@ -77,7 +70,11 @@ extern char * const migratetype_names[MIGRATE_TYPES];
 
 #ifdef CONFIG_CMA
 #  define is_migrate_cma(migratetype) unlikely((migratetype) == MIGRATE_CMA)
-#  define is_migrate_cma_page(_page) (get_pageblock_migratetype(_page) == MIGRATE_CMA)
+#  define is_migrate_cma_page(_page) ({						\
+	int mt = get_pageblock_migratetype(_page);				\
+	bool ret = (mt == MIGRATE_ISOLATE || mt == MIGRATE_CMA) ? true : false;	\
+	ret;									\
+})
 #  define get_cma_migrate_type() MIGRATE_CMA
 #else
 #  define is_migrate_cma(migratetype) false
@@ -375,11 +372,6 @@ enum zone_type {
 
 #ifndef __GENERATING_BOUNDS_H
 
-#ifdef CONFIG_EMERGENCY_MEMORY
-/* The maximum number of pages in MIGRATE_EMERGENCY migration type */
-#define MAX_MANAGED_EMERGENCY 2048
-#endif
-
 struct zone {
 	/* Read-mostly fields */
 
@@ -388,10 +380,7 @@ struct zone {
 	unsigned long watermark_boost;
 
 	unsigned long nr_reserved_highatomic;
-#ifdef CONFIG_EMERGENCY_MEMORY
-	/* The actual number of pages in MIGRATE_EMERGENCY migration type */
-	unsigned long nr_reserved_emergency;
-#endif
+
 	/*
 	 * We don't know if the memory that we're going to allocate will be
 	 * freeable or/and it will be released eventually, so to avoid totally
@@ -458,14 +447,8 @@ struct zone {
 	 * Write access to present_pages at runtime should be protected by
 	 * mem_hotplug_begin/end(). Any reader who can't tolerant drift of
 	 * present_pages should get_online_mems() to get a stable value.
-	 *
-	 * Read access to managed_pages should be safe because it's unsigned
-	 * long. Write access to zone->managed_pages and totalram_pages are
-	 * protected by managed_page_count_lock at runtime. Idealy only
-	 * adjust_managed_page_count() should be used instead of directly
-	 * touching zone->managed_pages and totalram_pages.
 	 */
-	unsigned long		managed_pages;
+	atomic_long_t		managed_pages;
 	unsigned long		spanned_pages;
 	unsigned long		present_pages;
 
@@ -566,6 +549,11 @@ enum zone_flags {
 					 * Cleared when kswapd is woken.
 					 */
 };
+
+static inline unsigned long zone_managed_pages(struct zone *zone)
+{
+	return (unsigned long)atomic_long_read(&zone->managed_pages);
+}
 
 static inline unsigned long zone_end_pfn(const struct zone *zone)
 {
@@ -866,7 +854,7 @@ static inline bool is_dev_zone(const struct zone *zone)
  */
 static inline bool managed_zone(struct zone *zone)
 {
-	return zone->managed_pages;
+	return zone_managed_pages(zone);
 }
 
 /* Returns true if a zone has memory */

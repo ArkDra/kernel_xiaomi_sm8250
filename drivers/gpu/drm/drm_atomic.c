@@ -34,7 +34,6 @@
 #include <linux/pm_qos.h>
 #include <linux/sync_file.h>
 #include <linux/devfreq_boost.h>
-#include <linux/cpu_input_boost.h>
 #include <linux/pm_qos.h>
 
 #include "drm_crtc_internal.h"
@@ -2615,7 +2614,6 @@ static int __drm_mode_atomic_ioctl(struct drm_device *dev, void *data,
 
 	/* Boost CPU and DDR when committing a new frame */
 	if (!(arg->flags & DRM_MODE_ATOMIC_TEST_ONLY)) {
-		cpu_input_boost_kick();
 		devfreq_boost_kick(DEVFREQ_CPU_LLCC_DDR_BW);
 	}
 
@@ -2750,8 +2748,7 @@ int drm_mode_atomic_ioctl(struct drm_device *dev, void *data,
 	 */
 	struct pm_qos_request req = {
 		.type = PM_QOS_REQ_AFFINE_CORES,
-		.cpus_affine = ATOMIC_INIT(BIT(raw_smp_processor_id()) |
-					   *cpumask_bits(cpu_prime_mask))
+		.cpus_affine = ATOMIC_INIT(BIT(raw_smp_processor_id()))
 	};
 	int ret;
 

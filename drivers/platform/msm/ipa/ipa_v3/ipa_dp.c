@@ -1926,7 +1926,6 @@ fail_kmem_cache_alloc:
 	}
 }
 
-
 static struct page *ipa3_alloc_page(
 	gfp_t flag, u32 *page_order, bool try_lower)
 {
@@ -1957,14 +1956,16 @@ static struct ipa3_rx_pkt_wrapper *ipa3_alloc_rx_pkt_page(
 		flag);
 	if (unlikely(!rx_pkt))
 		return NULL;
+
 	rx_pkt->page_data.page_order = IPA_WAN_PAGE_ORDER;
+	/* For temporary allocations, avoid triggering OOM Killer. */
 	if (is_tmp_alloc)
 		flag |= __GFP_RETRY_MAYFAIL | __GFP_NOWARN;
-
 	/* Try a lower order page for order 3 pages in case allocation fails. */
 	rx_pkt->page_data.page = ipa3_alloc_page(flag,
 				&rx_pkt->page_data.page_order,
 			(is_tmp_alloc && rx_pkt->page_data.page_order == 3));
+
 	if (unlikely(!rx_pkt->page_data.page))
 		goto fail_page_alloc;
 
@@ -2674,8 +2675,7 @@ static void free_rx_page(void *chan_user_data, void *xfer_user_data)
 	}
 	dma_unmap_page(ipa3_ctx->pdev, rx_pkt->page_data.dma_addr,
 		rx_pkt->len, DMA_FROM_DEVICE);
-	__free_pages(rx_pkt->page_data.page,
-		rx_pkt->page_data.page_order);
+	__free_pages(rx_pkt->page_data.page, rx_pkt->page_data.page_order);
 	kmem_cache_free(ipa3_ctx->rx_pkt_wrapper_cache, rx_pkt);
 }
 
@@ -2727,7 +2727,7 @@ static void ipa3_cleanup_rx(struct ipa3_sys_context *sys)
 					rx_pkt->len,
 					DMA_FROM_DEVICE);
 				__free_pages(rx_pkt->page_data.page,
-					rx_pkt->page_data.page_order);
+						rx_pkt->page_data.page_order);
 			}
 			kmem_cache_free(ipa3_ctx->rx_pkt_wrapper_cache,
 				rx_pkt);
@@ -3520,7 +3520,7 @@ static struct sk_buff *handle_page_completion(struct gsi_chan_xfer_notify
 			dma_unmap_page(ipa3_ctx->pdev, rx_page.dma_addr,
 					rx_pkt->len, DMA_FROM_DEVICE);
 			__free_pages(rx_pkt->page_data.page,
-							IPA_WAN_PAGE_ORDER);
+					rx_pkt->page_data.page_order);
 		}
 		rx_pkt->sys->free_rx_wrapper(rx_pkt);
 		IPA_STATS_INC_CNT(ipa3_ctx->stats.rx_page_drop_cnt);

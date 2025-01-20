@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-#include <linux/mm.h>
+#include <linux/pagewalk.h>
 #include <linux/vmacache.h>
 #include <linux/hugetlb.h>
 #include <linux/huge_mm.h>
@@ -19,8 +19,6 @@
 #include <linux/shmem_fs.h>
 #include <linux/uaccess.h>
 #include <linux/pkeys.h>
-#include <linux/mm_inline.h>
-#include <linux/ctype.h>
 
 #include <asm/elf.h>
 #include <asm/tlb.h>
@@ -928,7 +926,9 @@ static int smaps_pte_hole(unsigned long addr, unsigned long end,
 
 	return 0;
 }
-#endif
+#else
+#define smaps_pte_hole		NULL
+#endif /* CONFIG_SHMEM */
 
 static void smaps_pte_entry(pte_t *pte, unsigned long addr,
 		struct mm_walk *walk)
@@ -1144,21 +1144,24 @@ static int smaps_hugetlb_range(pte_t *pte, unsigned long hmask,
 	}
 	return 0;
 }
+#else
+#define smaps_hugetlb_range	NULL
 #endif /* HUGETLB_PAGE */
+
+static const struct mm_walk_ops smaps_walk_ops = {
+	.pmd_entry		= smaps_pte_range,
+	.hugetlb_entry		= smaps_hugetlb_range,
+};
+
+static const struct mm_walk_ops smaps_shmem_walk_ops = {
+	.pmd_entry		= smaps_pte_range,
+	.hugetlb_entry		= smaps_hugetlb_range,
+	.pte_hole		= smaps_pte_hole,
+};
 
 static void smap_gather_stats(struct vm_area_struct *vma,
 			     struct mem_size_stats *mss)
 {
-	struct mm_walk smaps_walk = {
-		.pmd_entry = smaps_pte_range,
-#ifdef CONFIG_HUGETLB_PAGE
-		.hugetlb_entry = smaps_hugetlb_range,
-#endif
-		.mm = vma->vm_mm,
-	};
-
-	smaps_walk.private = mss;
-
 #ifdef CONFIG_SHMEM
 	/* In case of smaps_rollup, reset the value from previous vma */
 	mss->check_shmem_swap = false;
@@ -1180,12 +1183,13 @@ static void smap_gather_stats(struct vm_area_struct *vma,
 			mss->swap += shmem_swapped;
 		} else {
 			mss->check_shmem_swap = true;
-			smaps_walk.pte_hole = smaps_pte_hole;
+			walk_page_vma(vma, &smaps_shmem_walk_ops, mss);
+			return;
 		}
 	}
 #endif
 	/* mmap_sem is held in m_start */
-	walk_page_vma(vma, &smaps_walk);
+	walk_page_vma(vma, &smaps_walk_ops, mss);
 }
 
 #define SEQ_PUT_DEC(str, val) \
@@ -1520,6 +1524,11 @@ static int clear_refs_test_walk(unsigned long start, unsigned long end,
 	return 0;
 }
 
+static const struct mm_walk_ops clear_refs_walk_ops = {
+	.pmd_entry		= clear_refs_pte_range,
+	.test_walk		= clear_refs_test_walk,
+};
+
 static ssize_t clear_refs_write(struct file *file, const char __user *buf,
 				size_t count, loff_t *ppos)
 {
@@ -1551,12 +1560,6 @@ static ssize_t clear_refs_write(struct file *file, const char __user *buf,
 	if (mm) {
 		struct clear_refs_private cp = {
 			.type = type,
-		};
-		struct mm_walk clear_refs_walk = {
-			.pmd_entry = clear_refs_pte_range,
-			.test_walk = clear_refs_test_walk,
-			.mm = mm,
-			.private = &cp,
 		};
 
 		if (type == CLEAR_REFS_MM_HIWATER_RSS) {
@@ -1618,7 +1621,8 @@ static ssize_t clear_refs_write(struct file *file, const char __user *buf,
 			}
 			mmu_notifier_invalidate_range_start(mm, 0, -1);
 		}
-		walk_page_range(0, mm->highest_vm_end, &clear_refs_walk);
+		walk_page_range(mm, 0, mm->highest_vm_end, &clear_refs_walk_ops,
+				&cp);
 		if (type == CLEAR_REFS_SOFT_DIRTY)
 			mmu_notifier_invalidate_range_end(mm, 0, -1);
 		tlb_finish_mmu(&tlb, 0, -1);
@@ -1890,7 +1894,15 @@ static int pagemap_hugetlb_range(pte_t *ptep, unsigned long hmask,
 
 	return err;
 }
+#else
+#define pagemap_hugetlb_range	NULL
 #endif /* HUGETLB_PAGE */
+
+static const struct mm_walk_ops pagemap_ops = {
+	.pmd_entry	= pagemap_pmd_range,
+	.pte_hole	= pagemap_pte_hole,
+	.hugetlb_entry	= pagemap_hugetlb_range,
+};
 
 /*
  * /proc/pid/pagemap - an array mapping virtual pages to pfns
@@ -1923,7 +1935,6 @@ static ssize_t pagemap_read(struct file *file, char __user *buf,
 {
 	struct mm_struct *mm = file->private_data;
 	struct pagemapread pm;
-	struct mm_walk pagemap_walk = {};
 	unsigned long src;
 	unsigned long svpfn;
 	unsigned long start_vaddr;
@@ -1950,14 +1961,6 @@ static ssize_t pagemap_read(struct file *file, char __user *buf,
 	ret = -ENOMEM;
 	if (!pm.buffer)
 		goto out_mm;
-
-	pagemap_walk.pmd_entry = pagemap_pmd_range;
-	pagemap_walk.pte_hole = pagemap_pte_hole;
-#ifdef CONFIG_HUGETLB_PAGE
-	pagemap_walk.hugetlb_entry = pagemap_hugetlb_range;
-#endif
-	pagemap_walk.mm = mm;
-	pagemap_walk.private = &pm;
 
 	src = *ppos;
 	svpfn = src / PM_ENTRY_BYTES;
@@ -1987,7 +1990,7 @@ static ssize_t pagemap_read(struct file *file, char __user *buf,
 		ret = down_read_killable(&mm->mmap_sem);
 		if (ret)
 			goto out_free;
-		ret = walk_page_range(start_vaddr, end, &pagemap_walk);
+		ret = walk_page_range(mm, start_vaddr, end, &pagemap_ops, &pm);
 		up_read(&mm->mmap_sem);
 		start_vaddr = end;
 
@@ -2039,341 +2042,6 @@ const struct file_operations proc_pagemap_operations = {
 	.release	= pagemap_release,
 };
 #endif /* CONFIG_PROC_PAGE_MONITOR */
-
-#ifdef CONFIG_PROCESS_RECLAIM
-static BLOCKING_NOTIFIER_HEAD(proc_reclaim_notifier);
-
-int proc_reclaim_notifier_register(struct notifier_block *nb)
-{
-	return blocking_notifier_chain_register(&proc_reclaim_notifier, nb);
-}
-
-int proc_reclaim_notifier_unregister(struct notifier_block *nb)
-{
-	return blocking_notifier_chain_unregister(&proc_reclaim_notifier, nb);
-}
-
-static void proc_reclaim_notify(unsigned long pid, void *rp)
-{
-	blocking_notifier_call_chain(&proc_reclaim_notifier, pid, rp);
-}
-
-int reclaim_address_space(struct address_space *mapping,
-			struct reclaim_param *rp)
-{
-	struct radix_tree_iter iter;
-	void __rcu **slot;
-	pgoff_t start;
-	struct page *page;
-	LIST_HEAD(page_list);
-	int reclaimed;
-	int ret = NOTIFY_OK;
-
-	lru_add_drain();
-	start = 0;
-	rcu_read_lock();
-
-	radix_tree_for_each_slot(slot, &mapping->i_pages, &iter, start) {
-
-		page = radix_tree_deref_slot(slot);
-
-		if (radix_tree_deref_retry(page)) {
-			slot = radix_tree_iter_retry(&iter);
-			continue;
-		}
-
-		if (radix_tree_exceptional_entry(page))
-			continue;
-
-		if (isolate_lru_page(page))
-			continue;
-
-		rp->nr_scanned++;
-
-		list_add(&page->lru, &page_list);
-		inc_node_page_state(page, NR_ISOLATED_ANON +
-				page_is_file_cache(page));
-
-		if (need_resched()) {
-			slot = radix_tree_iter_resume(slot, &iter);
-			cond_resched_rcu();
-		}
-	}
-	rcu_read_unlock();
-	reclaimed = reclaim_pages_from_list(&page_list, NULL);
-	rp->nr_reclaimed += reclaimed;
-
-	if (rp->nr_scanned >= rp->nr_to_reclaim)
-		ret = NOTIFY_DONE;
-
-	return ret;
-}
-
-static int reclaim_pte_range(pmd_t *pmd, unsigned long addr,
-				unsigned long end, struct mm_walk *walk)
-{
-	struct reclaim_param *rp = walk->private;
-	struct vm_area_struct *vma = rp->vma;
-	pte_t *pte, ptent;
-	spinlock_t *ptl;
-	struct page *page;
-	LIST_HEAD(page_list);
-	int isolated;
-	int reclaimed;
-
-	split_huge_pmd(vma, addr, pmd);
-	if (pmd_trans_unstable(pmd) || !rp->nr_to_reclaim)
-		return 0;
-cont:
-	isolated = 0;
-	pte = pte_offset_map_lock(vma->vm_mm, pmd, addr, &ptl);
-	for (; addr != end; pte++, addr += PAGE_SIZE) {
-		ptent = *pte;
-		if (!pte_present(ptent))
-			continue;
-
-		page = vm_normal_page(vma, addr, ptent);
-		if (!page)
-			continue;
-
-		if (isolate_lru_page(compound_head(page)))
-			continue;
-
-		/* MADV_FREE clears pte dirty bit and then marks the page
-		 * lazyfree (clear SwapBacked). Inbetween if this lazyfreed page
-		 * is touched by user then it becomes dirty.  PPR in
-		 * shrink_page_list in try_to_unmap finds the page dirty, marks
-		 * it back as PageSwapBacked and skips reclaim. This can cause
-		 * isolated count mismatch.
-		 */
-		if (PageAnon(page) && !PageSwapBacked(page)) {
-			putback_lru_page(page);
-			continue;
-		}
-
-		list_add(&page->lru, &page_list);
-		inc_node_page_state(page, NR_ISOLATED_ANON +
-				page_is_file_cache(page));
-		isolated++;
-		rp->nr_scanned++;
-		if ((isolated >= SWAP_CLUSTER_MAX) || !rp->nr_to_reclaim)
-			break;
-	}
-	pte_unmap_unlock(pte - 1, ptl);
-	reclaimed = reclaim_pages_from_list(&page_list, vma);
-	rp->nr_reclaimed += reclaimed;
-	rp->nr_to_reclaim -= reclaimed;
-	if (rp->nr_to_reclaim < 0)
-		rp->nr_to_reclaim = 0;
-
-	if (rp->nr_to_reclaim && (addr != end))
-		goto cont;
-
-	cond_resched();
-	return 0;
-}
-
-enum reclaim_type {
-	RECLAIM_FILE,
-	RECLAIM_ANON,
-	RECLAIM_ALL,
-	RECLAIM_RANGE,
-};
-
-struct reclaim_param reclaim_task_nomap(struct task_struct *task,
-		int nr_to_reclaim)
-{
-	struct mm_struct *mm;
-	struct reclaim_param rp = {
-		.nr_to_reclaim = nr_to_reclaim,
-	};
-
-	get_task_struct(task);
-	mm = get_task_mm(task);
-	if (!mm)
-		goto out;
-	down_read(&mm->mmap_sem);
-
-	proc_reclaim_notify((unsigned long)task_pid(task), (void *)&rp);
-
-	up_read(&mm->mmap_sem);
-	mmput(mm);
-out:
-	put_task_struct(task);
-	return rp;
-}
-
-struct reclaim_param reclaim_task_anon(struct task_struct *task,
-		int nr_to_reclaim)
-{
-	struct mm_struct *mm;
-	struct vm_area_struct *vma;
-	struct mm_walk reclaim_walk = {};
-	struct reclaim_param rp = {
-		.nr_to_reclaim = nr_to_reclaim,
-	};
-
-	get_task_struct(task);
-	mm = get_task_mm(task);
-	if (!mm)
-		goto out;
-
-	reclaim_walk.mm = mm;
-	reclaim_walk.pmd_entry = reclaim_pte_range;
-
-	reclaim_walk.private = &rp;
-
-	down_read(&mm->mmap_sem);
-	for (vma = mm->mmap; vma; vma = vma->vm_next) {
-		if (is_vm_hugetlb_page(vma))
-			continue;
-
-		if (vma->vm_file)
-			continue;
-
-		if (!rp.nr_to_reclaim)
-			break;
-
-		rp.vma = vma;
-		walk_page_range(vma->vm_start, vma->vm_end,
-			&reclaim_walk);
-	}
-
-	flush_tlb_mm(mm);
-	up_read(&mm->mmap_sem);
-	mmput(mm);
-out:
-	put_task_struct(task);
-	return rp;
-}
-
-static ssize_t reclaim_write(struct file *file, const char __user *buf,
-				size_t count, loff_t *ppos)
-{
-	struct task_struct *task;
-	char buffer[200];
-	struct mm_struct *mm;
-	struct vm_area_struct *vma;
-	enum reclaim_type type;
-	char *type_buf;
-	struct mm_walk reclaim_walk = {};
-	unsigned long start = 0;
-	unsigned long end = 0;
-	struct reclaim_param rp;
-
-	memset(buffer, 0, sizeof(buffer));
-	if (count > sizeof(buffer) - 1)
-		count = sizeof(buffer) - 1;
-
-	if (copy_from_user(buffer, buf, count))
-		return -EFAULT;
-
-	type_buf = strstrip(buffer);
-	if (!strcmp(type_buf, "file"))
-		type = RECLAIM_FILE;
-	else if (!strcmp(type_buf, "anon"))
-		type = RECLAIM_ANON;
-	else if (!strcmp(type_buf, "all"))
-		type = RECLAIM_ALL;
-	else if (isdigit(*type_buf))
-		type = RECLAIM_RANGE;
-	else
-		goto out_err;
-
-	if (type == RECLAIM_RANGE) {
-		char *token;
-		unsigned long long len, len_in, tmp;
-
-		token = strsep(&type_buf, " ");
-		if (!token)
-			goto out_err;
-		tmp = memparse(token, &token);
-		if (tmp & ~PAGE_MASK || tmp > ULONG_MAX)
-			goto out_err;
-		start = tmp;
-
-		token = strsep(&type_buf, " ");
-		if (!token)
-			goto out_err;
-		len_in = memparse(token, &token);
-		len = (len_in + ~PAGE_MASK) & PAGE_MASK;
-		if (len > ULONG_MAX)
-			goto out_err;
-		/*
-		 * Check to see whether len was rounded up from small -ve
-		 * to zero.
-		 */
-		if (len_in && !len)
-			goto out_err;
-
-		end = start + len;
-		if (end < start)
-			goto out_err;
-	}
-
-	task = get_proc_task(file->f_path.dentry->d_inode);
-	if (!task)
-		return -ESRCH;
-
-	mm = get_task_mm(task);
-	if (!mm)
-		goto out;
-
-	reclaim_walk.mm = mm;
-	reclaim_walk.pmd_entry = reclaim_pte_range;
-
-	rp.nr_to_reclaim = INT_MAX;
-	rp.nr_reclaimed = 0;
-	reclaim_walk.private = &rp;
-
-	down_read(&mm->mmap_sem);
-	if (type == RECLAIM_RANGE) {
-		vma = find_vma(mm, start);
-		while (vma) {
-			if (vma->vm_start > end)
-				break;
-			if (is_vm_hugetlb_page(vma))
-				continue;
-
-			rp.vma = vma;
-			walk_page_range(max(vma->vm_start, start),
-					min(vma->vm_end, end),
-					&reclaim_walk);
-			vma = vma->vm_next;
-		}
-	} else {
-		for (vma = mm->mmap; vma; vma = vma->vm_next) {
-			if (is_vm_hugetlb_page(vma))
-				continue;
-
-			if (type == RECLAIM_ANON && vma->vm_file)
-				continue;
-
-			if (type == RECLAIM_FILE && !vma->vm_file)
-				continue;
-
-			rp.vma = vma;
-			walk_page_range(vma->vm_start, vma->vm_end,
-				&reclaim_walk);
-		}
-	}
-
-	flush_tlb_mm(mm);
-	up_read(&mm->mmap_sem);
-	mmput(mm);
-out:
-	put_task_struct(task);
-	return count;
-
-out_err:
-	return -EINVAL;
-}
-
-const struct file_operations proc_reclaim_operations = {
-	.write		= reclaim_write,
-	.llseek		= noop_llseek,
-};
-#endif
 
 #ifdef CONFIG_NUMA
 
@@ -2534,6 +2202,11 @@ static int gather_hugetlb_stats(pte_t *pte, unsigned long hmask,
 }
 #endif
 
+static const struct mm_walk_ops show_numa_ops = {
+	.hugetlb_entry = gather_hugetlb_stats,
+	.pmd_entry = gather_pte_stats,
+};
+
 /*
  * Display pages allocated per node and memory policy via /proc.
  */
@@ -2545,12 +2218,6 @@ static int show_numa_map(struct seq_file *m, void *v)
 	struct numa_maps *md = &numa_priv->md;
 	struct file *file = vma->vm_file;
 	struct mm_struct *mm = vma->vm_mm;
-	struct mm_walk walk = {
-		.hugetlb_entry = gather_hugetlb_stats,
-		.pmd_entry = gather_pte_stats,
-		.private = md,
-		.mm = mm,
-	};
 	struct mempolicy *pol;
 	char buffer[64];
 	int nid;
@@ -2584,7 +2251,7 @@ static int show_numa_map(struct seq_file *m, void *v)
 		seq_puts(m, " huge");
 
 	/* mmap_sem is held by m_start */
-	walk_page_vma(vma, &walk);
+	walk_page_vma(vma, &show_numa_ops, md);
 
 	if (!md->pages)
 		goto out;
